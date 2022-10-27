@@ -14,6 +14,6 @@ spec:
     spec:
       containers:
       - name: app-foodme
-        image: nandocloud/app-delivery:1.0
+        image: nandocloud/app-delivery:latest
         ports:
         - containerPort: 3000
