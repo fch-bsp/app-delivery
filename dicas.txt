@@ -1,0 +1,25 @@
+https://developer.newrelic.
+
+com/collect-data/monitor-your-application/set-up-env/
+
+Clone the lab repository.
+
+
+git clone https://github.com/newrelic-experimental/NewRelic-basics-lab-material.git
+
+
+Navigate to the root directory of your application, install dependencies, and run the application.
+
+
+cd NewRelic-basics-lab-material/FoodMe
+
+npm install
+
+node ./server/start.js
+
+Go to http://localhost:3000/
+
+
+# Mata processo que está rodando na porta 8080
+sudo kill -9 `sudo lsof -t -i:3000`
+sudo kill -9 $(lsof -t -i:3000)

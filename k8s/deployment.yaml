@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-foodme
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: app-foodme
+  template:
+    metadata:
+      labels:
+        app: app-foodme
+    spec:
+      containers:
+      - name: app-foodme
+        image: nandocloud/app-delivery:latest
+        ports:
+        - containerPort: 3000
