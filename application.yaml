@@ -9,7 +9,7 @@ spec:
   source:
     repoURL: https://github.com/fch-bsp/app-delivery.git
     targetRevision: HEAD
-    path: ./FoodMe/k8s # monitorando de 3 em 3 minutos 
+    path: k8s # monitorando de 3 em 3 minutos 
   destination: 
     server: https://kubernetes.default.svc
     namespace: foodme
