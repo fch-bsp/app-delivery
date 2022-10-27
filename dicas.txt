@@ -11,7 +11,7 @@ git clone https://github.com/newrelic-experimental/NewRelic-basics-lab-material.
 Navigate to the root directory of your application, install dependencies, and run the application.
 
 
-cd NewRelic-basics-lab-material/FoodMe
+cd app-delivery/FoodMe
 
 npm install
 
