@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- deployment.yaml
+- service.yaml
+
+namespace: foodme
+images:
+- name: app-foodme
+  newName: nandocloud/app-delivery
+  newTag: latest
