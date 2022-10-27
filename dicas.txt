@@ -12,7 +12,7 @@ Navigate to the root directory of your application, install dependencies, and ru
 
 
 cd NewRelic-basics-lab-material/FoodMe
-ok
+
 npm install
 
 node ./server/start.js
