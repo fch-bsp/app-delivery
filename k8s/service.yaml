@@ -1,24 +1,12 @@
-# apiVersion: v1
-# kind: Service
-# metadata:
-#   name: app-foodme
-#   namespace: foodme
-# spec:
-#   type: LoadBalancer
-#   ports:
-#   - port: 3000
-#   selector:
-#     env: app-foodme
-
-
 apiVersion: v1
 kind: Service
 metadata:
   name: app-foodme
   namespace: foodme
 spec:
-  selector:
-  ports:
-    port: 3000
-    targetPort: 8080
   type: LoadBalancer
+  ports:
+  - port: 3000
+  selector:
+    env: app-foodme
+
