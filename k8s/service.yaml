@@ -4,7 +4,7 @@ metadata:
   name: app-foodme
   namespace: foodme
 spec:
-  type: LoadBalancer
+  type: NodePort
   ports:
   - port: 3000
   selector:
