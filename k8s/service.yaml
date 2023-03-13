@@ -4,7 +4,7 @@ metadata:
   name: app-foodme
   namespace: foodme
 spec:
-  type: NodePort
+  type: ClusterIP
   ports:
   - port: 3000
   selector:
