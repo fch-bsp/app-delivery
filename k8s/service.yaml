@@ -5,7 +5,7 @@ metadata:
   namespace: foodme
 spec:
   type: LoadBalancer
-  ports: 80
+  ports:
   - port: 3000
     protocol: TCP
     name: http
