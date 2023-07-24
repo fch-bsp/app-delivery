@@ -5,9 +5,10 @@ metadata:
   namespace: foodme
 spec:
   type: LoadBalancer
-  ports:
+  ports: 80
   - port: 3000
     protocol: TCP
+    name: http
   selector:
     env: app-foodme
 
