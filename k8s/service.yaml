@@ -10,5 +10,4 @@ spec:
     protocol: TCP
     name: http
   selector:
-    env: app-foodme
-
+    app: app-foodme
