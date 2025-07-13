@@ -1,0 +1,81 @@
+name: Simple Test - Debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Type of test'
+        required: true
+        default: 'basic'
+        type: choice
+        options:
+        - basic
+        - advanced
+
+jobs:
+  test-basic:
+    name: Basic Test
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_type == 'basic' || github.event.inputs.test_type == ''
+    
+    steps:
+    - name: Basic validation
+      run: |
+        echo "✅ Basic test running"
+        echo "✅ Basic test completed"
+
+  test-advanced:
+    name: Advanced Test
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_type == 'advanced'
+    
+    steps:
+    - name: Advanced validation
+      run: |
+        echo "✅ Advanced test running"
+        sleep 2
+        echo "✅ Advanced test completed"
+
+  summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [test-basic, test-advanced]
+    if: always()
+    
+    steps:
+    - name: Show results
+      run: |
+        echo "📊 Test Results"
+        echo "==============="
+        
+        BASIC_RESULT="${{ needs.test-basic.result }}"
+        ADVANCED_RESULT="${{ needs.test-advanced.result }}"
+        
+        echo "Basic: $BASIC_RESULT"
+        echo "Advanced: $ADVANCED_RESULT"
+        
+        # Simple counting
+        SUCCESS=0
+        TOTAL=0
+        
+        if [ "$BASIC_RESULT" = "success" ]; then
+          SUCCESS=$((SUCCESS + 1))
+        fi
+        if [ "$BASIC_RESULT" != "" ] && [ "$BASIC_RESULT" != "skipped" ]; then
+          TOTAL=$((TOTAL + 1))
+        fi
+        
+        if [ "$ADVANCED_RESULT" = "success" ]; then
+          SUCCESS=$((SUCCESS + 1))
+        fi
+        if [ "$ADVANCED_RESULT" != "" ] && [ "$ADVANCED_RESULT" != "skipped" ]; then
+          TOTAL=$((TOTAL + 1))
+        fi
+        
+        echo "Success: $SUCCESS/$TOTAL"
+        
+        if [ $SUCCESS -eq $TOTAL ] && [ $TOTAL -gt 0 ]; then
+          echo "✅ All tests passed!"
+        else
+          echo "⚠️ Some issues found"
+        fi
