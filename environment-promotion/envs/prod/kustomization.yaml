@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: foodme-prod
+namePrefix: prod-
+
+resources:
+- ../../base
+
+patchesStrategicMerge:
+- replicas.yaml
+- environment.yaml
+- service.yaml
+
+images:
+- name: nandocloud/app-delivery
+  newTag: latest
+
+commonLabels:
+  environment: prod
+  tier: production
