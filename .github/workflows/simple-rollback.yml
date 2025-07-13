@@ -1,0 +1,273 @@
+# Rollback a GitOps application to a previous version
+
+name: Simple Application Rollback
+
+# Controls when the workflow will run
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment for rollback'
+        required: true
+        default: 'staging' 
+        type: choice
+        options:
+        - qa
+        - staging
+        - prod 
+      rollback_type:
+        description: 'What to rollback'
+        required: true
+        default: 'container_only' 
+        type: choice
+        options:
+        - container_only
+        - replicas_only
+        - config_only
+        - full_rollback
+      backup_source:
+        description: 'Backup source to restore from'
+        required: true
+        default: 'previous_env' 
+        type: choice
+        options:
+        - previous_env
+        - qa_backup
+        - staging_backup
+        - manual_backup
+      create_backup:
+        description: 'Create backup before rollback'
+        required: true 
+        type: boolean 
+        default: true
+      confirm_rollback:
+        description: '⚠️ Confirm you want to proceed with rollback'
+        required: true 
+        type: boolean 
+        default: false
+      message:
+        description: 'Rollback commit message'
+        required: true 
+        type: string  
+        default: '🔄 Emergency rollback - restoring previous version'
+
+jobs:
+  validate-rollback:
+    name: Validate Rollback Request
+    runs-on: ubuntu-latest
+    outputs:
+      can_rollback: ${{ steps.validation.outputs.can_rollback }}
+      backup_env: ${{ steps.validation.outputs.backup_env }}
+    steps:
+      - name: Validate rollback request
+        id: validation
+        run: |
+          # Safety check - require confirmation
+          if [ "${{ inputs.confirm_rollback }}" != "true" ]; then
+            echo "❌ Rollback not confirmed. Please check the confirmation box."
+            echo "can_rollback=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Determine backup source environment
+          case "${{ inputs.backup_source }}" in
+            "previous_env")
+              case "${{ inputs.environment }}" in
+                "prod") echo "backup_env=staging" >> $GITHUB_OUTPUT ;;
+                "staging") echo "backup_env=qa" >> $GITHUB_OUTPUT ;;
+                "qa") echo "backup_env=staging" >> $GITHUB_OUTPUT ;;
+              esac
+              ;;
+            "qa_backup") echo "backup_env=qa" >> $GITHUB_OUTPUT ;;
+            "staging_backup") echo "backup_env=staging" >> $GITHUB_OUTPUT ;;
+            "manual_backup") echo "backup_env=qa" >> $GITHUB_OUTPUT ;;
+          esac
+          
+          echo "✅ Rollback validation passed"
+          echo "can_rollback=true" >> $GITHUB_OUTPUT
+
+  rollback:
+    name: Execute Rollback
+    needs: validate-rollback
+    if: needs.validate-rollback.outputs.can_rollback == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for rollback operations
+
+      - name: Create timestamp for backup
+        id: timestamp
+        run: echo "timestamp=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+
+      - name: Create current state backup
+        if: ${{ inputs.create_backup }}
+        run: |
+          backup_dir="environment-promotion/backups/${{ inputs.environment }}/${{ steps.timestamp.outputs.timestamp }}"
+          mkdir -p "$backup_dir"
+          
+          # Backup current environment configuration
+          source_dir="environment-promotion/envs/${{ inputs.environment }}"
+          if [ -d "$source_dir" ]; then
+            cp -r "$source_dir"/* "$backup_dir"/
+            echo "✅ Backup created at: $backup_dir"
+            
+            # Create backup metadata
+            cat > "$backup_dir/backup-metadata.json" << EOF
+          {
+            "timestamp": "${{ steps.timestamp.outputs.timestamp }}",
+            "environment": "${{ inputs.environment }}",
+            "backup_reason": "Pre-rollback backup",
+            "git_commit": "${{ github.sha }}",
+            "workflow_run": "${{ github.run_id }}"
+          }
+          EOF
+          else
+            echo "⚠️ No environment directory found for ${{ inputs.environment }}"
+          fi
+
+      - name: Rollback container configuration
+        if: ${{ inputs.rollback_type == 'container_only' || inputs.rollback_type == 'full_rollback' }}
+        uses: canastro/copy-file-action@master
+        with:
+          source: "environment-promotion/envs/${{ needs.validate-rollback.outputs.backup_env }}/environment.yaml"
+          target: "environment-promotion/envs/${{ inputs.environment }}/environment.yaml"
+
+      - name: Rollback replica configuration
+        if: ${{ inputs.rollback_type == 'replicas_only' || inputs.rollback_type == 'full_rollback' }}
+        uses: canastro/copy-file-action@master
+        with:
+          source: "environment-promotion/envs/${{ needs.validate-rollback.outputs.backup_env }}/replicas.yaml"
+          target: "environment-promotion/envs/${{ inputs.environment }}/replicas.yaml"
+
+      - name: Rollback service configuration
+        if: ${{ inputs.rollback_type == 'config_only' || inputs.rollback_type == 'full_rollback' }}
+        uses: canastro/copy-file-action@master
+        with:
+          source: "environment-promotion/envs/${{ needs.validate-rollback.outputs.backup_env }}/service.yaml"
+          target: "environment-promotion/envs/${{ inputs.environment }}/service.yaml"
+
+      - name: Rollback kustomization
+        if: ${{ inputs.rollback_type == 'config_only' || inputs.rollback_type == 'full_rollback' }}
+        uses: canastro/copy-file-action@master
+        with:
+          source: "environment-promotion/envs/${{ needs.validate-rollback.outputs.backup_env }}/kustomization.yaml"
+          target: "environment-promotion/envs/${{ inputs.environment }}/kustomization.yaml"
+
+      - name: Validate rollback files
+        run: |
+          echo "🔍 Validating rollback files..."
+          target_dir="environment-promotion/envs/${{ inputs.environment }}"
+          
+          # Check if files exist and are valid YAML
+          for file in environment.yaml replicas.yaml service.yaml kustomization.yaml; do
+            if [ -f "$target_dir/$file" ]; then
+              echo "✅ Found: $file"
+              # Basic YAML validation
+              if python3 -c "import yaml; yaml.safe_load(open('$target_dir/$file'))" 2>/dev/null; then
+                echo "   ✅ Valid YAML syntax"
+              else
+                echo "   ❌ Invalid YAML syntax in $file"
+                exit 1
+              fi
+            else
+              echo "⚠️  Missing: $file"
+            fi
+          done
+          
+          echo "✅ All rollback files are valid"
+
+      - name: Create rollback summary
+        run: |
+          echo "## 🔄 Rollback Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Rollback Type:** ${{ inputs.rollback_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Backup Source:** ${{ inputs.backup_source }} (${{ needs.validate-rollback.outputs.backup_env }})" >> $GITHUB_STEP_SUMMARY
+          echo "**Backup Created:** ${{ inputs.create_backup }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** ${{ steps.timestamp.outputs.timestamp }}" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Files Rolled Back:" >> $GITHUB_STEP_SUMMARY
+          
+          case "${{ inputs.rollback_type }}" in
+            "container_only")
+              echo "- ✅ environment.yaml" >> $GITHUB_STEP_SUMMARY
+              ;;
+            "replicas_only")
+              echo "- ✅ replicas.yaml" >> $GITHUB_STEP_SUMMARY
+              ;;
+            "config_only")
+              echo "- ✅ service.yaml" >> $GITHUB_STEP_SUMMARY
+              echo "- ✅ kustomization.yaml" >> $GITHUB_STEP_SUMMARY
+              ;;
+            "full_rollback")
+              echo "- ✅ environment.yaml" >> $GITHUB_STEP_SUMMARY
+              echo "- ✅ replicas.yaml" >> $GITHUB_STEP_SUMMARY
+              echo "- ✅ service.yaml" >> $GITHUB_STEP_SUMMARY
+              echo "- ✅ kustomization.yaml" >> $GITHUB_STEP_SUMMARY
+              ;;
+          esac
+          
+          if [ "${{ inputs.create_backup }}" = "true" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 💾 Backup Location:" >> $GITHUB_STEP_SUMMARY
+            echo "Current state backed up to: \`environment-promotion/backups/${{ inputs.environment }}/${{ steps.timestamp.outputs.timestamp }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: |
+            ${{ inputs.message }}
+            
+            Environment: ${{ inputs.environment }}
+            Rollback type: ${{ inputs.rollback_type }}
+            Backup source: ${{ inputs.backup_source }} (${{ needs.validate-rollback.outputs.backup_env }})
+            Backup timestamp: ${{ steps.timestamp.outputs.timestamp }}
+            
+            [skip ci]
+          file_pattern: 'environment-promotion/envs/${{ inputs.environment }}/* environment-promotion/backups/**'
+
+  notify-success:
+    name: Notify Success
+    runs-on: ubuntu-latest
+    needs: rollback
+    if: success()
+    
+    steps:
+      - name: Success notification
+        run: |
+          echo "🔄 Rollback completed successfully!"
+          echo "=================================="
+          echo "• Environment: ${{ inputs.environment }}"
+          echo "• Rollback type: ${{ inputs.rollback_type }}"
+          echo "• Backup source: ${{ inputs.backup_source }}"
+          echo "• Backup created: ${{ inputs.create_backup }}"
+          echo "• Timestamp: $(date)"
+          echo ""
+          if [ "${{ inputs.environment }}" = "prod" ]; then
+            echo "⚠️ PRODUCTION ROLLBACK COMPLETED"
+            echo "Please monitor the application closely and verify functionality."
+          else
+            echo "✅ Environment ${{ inputs.environment }} has been rolled back!"
+          fi
+
+  notify-failure:
+    name: Notify Failure
+    runs-on: ubuntu-latest
+    needs: [validate-rollback, rollback]
+    if: failure()
+    
+    steps:
+      - name: Failure notification
+        run: |
+          echo "❌ Rollback failed!"
+          echo "=================="
+          echo "• Environment: ${{ inputs.environment }}"
+          echo "• Rollback type: ${{ inputs.rollback_type }}"
+          echo "• Check the workflow logs for details"
+          echo "• Verify the backup source files exist"
+          echo "• Ensure rollback confirmation was checked"
