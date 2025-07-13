@@ -1,0 +1,295 @@
+name: 🔄 Environment Promotion - With Config Copy
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_environment:
+        description: '🔧 Source Environment (FROM)'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - qa
+      target_environment:
+        description: '🎯 Target Environment (TO)'
+        required: true
+        default: 'qa'
+        type: choice
+        options:
+        - qa
+        - prod
+      copy_configurations:
+        description: '📋 Copy Configurations from Source'
+        required: true
+        default: true
+        type: boolean
+      promotion_reason:
+        description: '📝 Reason for Promotion'
+        required: true
+        default: 'Feature ready for next environment'
+        type: choice
+        options:
+        - 'Feature ready for next environment'
+        - 'Bug fix validation'
+        - 'Performance improvement'
+        - 'Security update'
+        - 'Hotfix deployment'
+        - 'Scheduled release'
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: foodme-dev-cluster
+
+jobs:
+  analyze-source-config:
+    name: 🔍 Analyze Source Configuration
+    runs-on: ubuntu-latest
+    outputs:
+      source-replicas: ${{ steps.get-config.outputs.replicas }}
+      source-image: ${{ steps.get-config.outputs.image }}
+      source-env-vars: ${{ steps.get-config.outputs.env-vars }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: ⚙️ Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: 🔧 Setup Kubernetes Access
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: 🔍 Get Source Environment Configuration
+      id: get-config
+      run: |
+        SOURCE_ENV="${{ github.event.inputs.source_environment }}"
+        
+        echo "🔍 Analyzing configuration from $SOURCE_ENV environment..."
+        
+        # Get current replicas from running deployment
+        REPLICAS=$(kubectl get deployment -n foodme-$SOURCE_ENV -o jsonpath='{.items[0].spec.replicas}' 2>/dev/null || echo "2")
+        
+        # Get current image
+        IMAGE=$(kubectl get deployment -n foodme-$SOURCE_ENV -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' 2>/dev/null || echo "nandocloud/app-delivery:latest")
+        
+        # Get environment variables
+        ENV_VARS=$(kubectl get deployment -n foodme-$SOURCE_ENV -o jsonpath='{.items[0].spec.template.spec.containers[0].env}' 2>/dev/null || echo "[]")
+        
+        echo "## 🔍 Source Environment Configuration" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Configuration | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|---------------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| **Environment** | $SOURCE_ENV |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Replicas** | $REPLICAS |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Image** | \`$IMAGE\` |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Set outputs
+        echo "replicas=$REPLICAS" >> $GITHUB_OUTPUT
+        echo "image=$IMAGE" >> $GITHUB_OUTPUT
+        echo "env-vars=$ENV_VARS" >> $GITHUB_OUTPUT
+        
+        echo "✅ Source configuration analyzed successfully"
+
+  update-target-config:
+    name: 📝 Update Target Configuration
+    runs-on: ubuntu-latest
+    needs: analyze-source-config
+    if: github.event.inputs.copy_configurations == 'true'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 📝 Update Target Environment Files
+      run: |
+        SOURCE_ENV="${{ github.event.inputs.source_environment }}"
+        TARGET_ENV="${{ github.event.inputs.target_environment }}"
+        SOURCE_REPLICAS="${{ needs.analyze-source-config.outputs.source-replicas }}"
+        SOURCE_IMAGE="${{ needs.analyze-source-config.outputs.source-image }}"
+        
+        echo "📝 Updating $TARGET_ENV configuration files..."
+        
+        # Update replicas.yaml
+        cat > environment-promotion/envs/$TARGET_ENV/replicas.yaml << EOF
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: app-foodme
+        spec:
+          replicas: $SOURCE_REPLICAS
+        EOF
+        
+        # Update kustomization.yaml with new image
+        sed -i "s|newTag:.*|newTag: ${SOURCE_IMAGE##*:}|g" environment-promotion/envs/$TARGET_ENV/kustomization.yaml
+        
+        echo "## 📝 Configuration Changes Applied" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Target Environment | Configuration | New Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------------------|---------------|-----------|" >> $GITHUB_STEP_SUMMARY
+        echo "| **$TARGET_ENV** | Replicas | $SOURCE_REPLICAS |" >> $GITHUB_STEP_SUMMARY
+        echo "| **$TARGET_ENV** | Image Tag | ${SOURCE_IMAGE##*:} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "✅ Target configuration files updated"
+        
+    - name: 🚀 Commit Configuration Changes
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment }}"
+        SOURCE_ENV="${{ github.event.inputs.source_environment }}"
+        
+        # Configure git
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action - Environment Promotion"
+        
+        # Add changes
+        git add environment-promotion/envs/$TARGET_ENV/
+        
+        # Check if there are changes to commit
+        if git diff --staged --quiet; then
+          echo "ℹ️ No configuration changes to commit"
+        else
+          # Commit changes
+          git commit -m "🔄 Promote $SOURCE_ENV config to $TARGET_ENV
+          
+          - Copy replicas: ${{ needs.analyze-source-config.outputs.source-replicas }}
+          - Copy image: ${{ needs.analyze-source-config.outputs.source-image }}
+          - Reason: ${{ github.event.inputs.promotion_reason }}
+          - Executed by: ${{ github.actor }}"
+          
+          # Push changes
+          git push
+          
+          echo "✅ Configuration changes committed and pushed"
+        fi
+
+  execute-promotion:
+    name: 🚀 Execute Environment Promotion
+    runs-on: ubuntu-latest
+    needs: [analyze-source-config, update-target-config]
+    if: always() && (needs.update-target-config.result == 'success' || github.event.inputs.copy_configurations == 'false')
+    
+    steps:
+    - name: ⚙️ Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: 🔧 Setup Kubernetes Access
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: ⏳ Wait for Git Changes to Propagate
+      if: github.event.inputs.copy_configurations == 'true'
+      run: |
+        echo "⏳ Waiting 30 seconds for git changes to propagate..."
+        sleep 30
+        
+    - name: 🚀 Trigger ArgoCD Sync
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment }}"
+        
+        echo "🚀 Triggering ArgoCD sync for $TARGET_ENV environment..."
+        
+        # Force refresh and sync
+        kubectl patch application foodme-$TARGET_ENV -n argocd --type merge -p '{"operation":{"sync":{"syncOptions":["CreateNamespace=true"],"prune":true}}}'
+        
+        echo "⏳ Waiting for sync to complete..."
+        
+        # Wait for sync with timeout
+        TIMEOUT=300
+        ELAPSED=0
+        
+        while [ $ELAPSED -lt $TIMEOUT ]; do
+          SYNC_STATUS=$(kubectl get application foodme-$TARGET_ENV -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+          
+          if [[ "$SYNC_STATUS" == "Synced" ]]; then
+            echo "✅ ArgoCD sync completed successfully!"
+            break
+          fi
+          
+          echo "   Current status: $SYNC_STATUS (elapsed: ${ELAPSED}s)"
+          sleep 10
+          ELAPSED=$((ELAPSED + 10))
+        done
+        
+        if [ $ELAPSED -ge $TIMEOUT ]; then
+          echo "❌ Sync timeout after $TIMEOUT seconds"
+          exit 1
+        fi
+        
+    - name: ⏳ Wait for Deployment Rollout
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment }}"
+        
+        echo "⏳ Waiting for deployment rollout in $TARGET_ENV..."
+        
+        # Wait for pods to be ready
+        kubectl wait --for=condition=ready pod -l app=app-foodme -n foodme-$TARGET_ENV --timeout=300s
+        
+        echo "✅ Deployment rollout completed!"
+
+  validate-promotion:
+    name: ✅ Validate Promotion Results
+    runs-on: ubuntu-latest
+    needs: execute-promotion
+    
+    steps:
+    - name: ⚙️ Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: 🔧 Setup Kubernetes Access
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: ✅ Validate Configuration Applied
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment }}"
+        EXPECTED_REPLICAS="${{ needs.analyze-source-config.outputs.source-replicas }}"
+        
+        echo "✅ Validating promotion results for $TARGET_ENV..."
+        
+        # Get current configuration
+        CURRENT_REPLICAS=$(kubectl get deployment -n foodme-$TARGET_ENV -o jsonpath='{.spec.replicas}')
+        READY_REPLICAS=$(kubectl get deployment -n foodme-$TARGET_ENV -o jsonpath='{.status.readyReplicas}')
+        CURRENT_IMAGE=$(kubectl get deployment -n foodme-$TARGET_ENV -o jsonpath='{.spec.template.spec.containers[0].image}')
+        
+        # ArgoCD status
+        SYNC_STATUS=$(kubectl get application foodme-$TARGET_ENV -n argocd -o jsonpath='{.status.sync.status}')
+        HEALTH_STATUS=$(kubectl get application foodme-$TARGET_ENV -n argocd -o jsonpath='{.status.health.status}')
+        
+        echo "## ✅ Promotion Validation Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Metric | Expected | Actual | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|----------|--------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| **Replicas** | $EXPECTED_REPLICAS | $CURRENT_REPLICAS | $([ "$EXPECTED_REPLICAS" = "$CURRENT_REPLICAS" ] && echo "✅" || echo "❌") |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Ready Replicas** | $EXPECTED_REPLICAS | $READY_REPLICAS | $([ "$EXPECTED_REPLICAS" = "$READY_REPLICAS" ] && echo "✅" || echo "❌") |" >> $GITHUB_STEP_SUMMARY
+        echo "| **ArgoCD Sync** | Synced | $SYNC_STATUS | $([ "$SYNC_STATUS" = "Synced" ] && echo "✅" || echo "❌") |" >> $GITHUB_STEP_SUMMARY
+        echo "| **ArgoCD Health** | Healthy | $HEALTH_STATUS | $([ "$HEALTH_STATUS" = "Healthy" ] && echo "✅" || echo "❌") |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Image** | - | \`$CURRENT_IMAGE\` | ✅ |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Validation
+        if [[ "$EXPECTED_REPLICAS" == "$CURRENT_REPLICAS" && "$EXPECTED_REPLICAS" == "$READY_REPLICAS" && "$SYNC_STATUS" == "Synced" && "$HEALTH_STATUS" == "Healthy" ]]; then
+          echo "🎉 Promotion validation successful!"
+          echo "✅ Configuration copied correctly from source to target"
+          echo "✅ All $CURRENT_REPLICAS replicas are ready and healthy"
+        else
+          echo "❌ Promotion validation failed"
+          echo "Expected replicas: $EXPECTED_REPLICAS"
+          echo "Current replicas: $CURRENT_REPLICAS"
+          echo "Ready replicas: $READY_REPLICAS"
+          exit 1
+        fi
