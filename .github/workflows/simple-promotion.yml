@@ -1,0 +1,217 @@
+# Promote a GitOps application from one environment to the next
+
+name: Simple Application Promotion
+
+# Controls when the workflow will run
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      source_env:
+        description: 'Source environment'
+        required: true
+        default: 'qa' 
+        type: choice
+        options:
+        - qa
+        - staging
+        - prod 
+      target_env:
+        description: 'Target environment'
+        required: true
+        default: 'staging' 
+        type: choice
+        options:
+        - qa
+        - staging
+        - prod 
+      promote_container:
+        description: 'Promote container tag'
+        required: true 
+        type: boolean 
+        default: true
+      promote_replicas:
+        description: 'Also promote replica configuration'
+        required: true 
+        type: boolean 
+        default: true
+      promote_configmaps:
+        description: 'Also promote application settings'
+        required: true 
+        type: boolean 
+        default: false
+      message:
+        description: 'Commit message'
+        required: true 
+        type: string  
+        default: 'Application promotion'
+
+jobs:
+  validate-promotion:
+    name: Validate Promotion Path
+    runs-on: ubuntu-latest
+    outputs:
+      can_promote: ${{ steps.validation.outputs.can_promote }}
+    steps:
+      - name: Validate promotion path
+        id: validation
+        run: |
+          source="${{ inputs.source_env }}"
+          target="${{ inputs.target_env }}"
+          
+          # Prevent promoting to the same environment
+          if [ "$source" = "$target" ]; then
+            echo "❌ Cannot promote from $source to $target (same environment)"
+            echo "can_promote=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Define valid promotion paths
+          case "$source-$target" in
+            "qa-staging"|"staging-prod")
+              echo "✅ Valid promotion path: $source → $target"
+              echo "can_promote=true" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "❌ Invalid promotion path: $source → $target"
+              echo "Valid paths: qa→staging, staging→prod"
+              echo "can_promote=false" >> $GITHUB_OUTPUT
+              exit 1
+              ;;
+          esac
+
+  promote:
+    name: Promote Application
+    needs: validate-promotion
+    if: needs.validate-promotion.outputs.can_promote == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v4
+
+      - name: Copy container version
+        if: ${{ inputs.promote_container }}
+        uses: canastro/copy-file-action@master
+        with:
+          source: "environment-promotion/envs/${{ inputs.source_env }}/environment.yaml"
+          target: "environment-promotion/envs/${{ inputs.target_env }}/environment.yaml"
+
+      - name: Copy replica configuration
+        if: ${{ inputs.promote_replicas }}
+        uses: canastro/copy-file-action@master
+        with:
+          source: "environment-promotion/envs/${{ inputs.source_env }}/replicas.yaml"
+          target: "environment-promotion/envs/${{ inputs.target_env }}/replicas.yaml"
+
+      - name: Copy service configuration
+        if: ${{ inputs.promote_configmaps }}
+        uses: canastro/copy-file-action@master
+        with:
+          source: "environment-promotion/envs/${{ inputs.source_env }}/service.yaml"
+          target: "environment-promotion/envs/${{ inputs.target_env }}/service.yaml"
+
+      - name: Copy kustomization
+        if: ${{ inputs.promote_configmaps }}
+        uses: canastro/copy-file-action@master
+        with:
+          source: "environment-promotion/envs/${{ inputs.source_env }}/kustomization.yaml"
+          target: "environment-promotion/envs/${{ inputs.target_env }}/kustomization.yaml"
+
+      - name: Create promotion summary
+        run: |
+          echo "## 🚀 Promotion Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Source Environment:** ${{ inputs.source_env }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Target Environment:** ${{ inputs.target_env }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Container Promoted:** ${{ inputs.promote_container }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Replicas Promoted:** ${{ inputs.promote_replicas }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Config Promoted:** ${{ inputs.promote_configmaps }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Files Promoted:" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ inputs.promote_container }}" = "true" ]; then
+            echo "- ✅ environment.yaml" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ inputs.promote_replicas }}" = "true" ]; then
+            echo "- ✅ replicas.yaml" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ inputs.promote_configmaps }}" = "true" ]; then
+            echo "- ✅ service.yaml" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ kustomization.yaml" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Validate promoted files
+        run: |
+          echo "🔍 Validating promoted files..."
+          target_dir="environment-promotion/envs/${{ inputs.target_env }}"
+          
+          # Check if files exist and are valid YAML
+          for file in environment.yaml replicas.yaml service.yaml kustomization.yaml; do
+            if [ -f "$target_dir/$file" ]; then
+              echo "✅ Found: $file"
+              # Basic YAML validation
+              if python3 -c "import yaml; yaml.safe_load(open('$target_dir/$file'))" 2>/dev/null; then
+                echo "   ✅ Valid YAML syntax"
+              else
+                echo "   ❌ Invalid YAML syntax in $file"
+                exit 1
+              fi
+            else
+              echo "⚠️  Missing: $file"
+            fi
+          done
+          
+          echo "✅ All promoted files are valid"
+
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: |
+            🚀 ${{ inputs.message }}
+            
+            Promoted from ${{ inputs.source_env }} to ${{ inputs.target_env }}
+            - Container: ${{ inputs.promote_container }}
+            - Replicas: ${{ inputs.promote_replicas }}
+            - Config: ${{ inputs.promote_configmaps }}
+            
+            [skip ci]
+          file_pattern: 'environment-promotion/envs/${{ inputs.target_env }}/*'
+
+  notify-success:
+    name: Notify Success
+    runs-on: ubuntu-latest
+    needs: promote
+    if: success()
+    
+    steps:
+      - name: Success notification
+        run: |
+          echo "🎉 Promotion completed successfully!"
+          echo "=================================="
+          echo "• Source: ${{ inputs.source_env }}"
+          echo "• Target: ${{ inputs.target_env }}"
+          echo "• Container promoted: ${{ inputs.promote_container }}"
+          echo "• Replicas promoted: ${{ inputs.promote_replicas }}"
+          echo "• Config promoted: ${{ inputs.promote_configmaps }}"
+          echo "• Timestamp: $(date)"
+          echo ""
+          echo "✅ Environment ${{ inputs.target_env }} has been updated!"
+
+  notify-failure:
+    name: Notify Failure
+    runs-on: ubuntu-latest
+    needs: [validate-promotion, promote]
+    if: failure()
+    
+    steps:
+      - name: Failure notification
+        run: |
+          echo "❌ Promotion failed!"
+          echo "==================="
+          echo "• Source: ${{ inputs.source_env }}"
+          echo "• Target: ${{ inputs.target_env }}"
+          echo "• Check the workflow logs for details"
+          echo "• Verify the source environment files exist"
+          echo "• Ensure the promotion path is valid"
