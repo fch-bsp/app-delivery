@@ -1,0 +1,235 @@
+name: Test Working - Environment Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      action_type:
+        description: 'Action to perform'
+        required: true
+        default: 'validate'
+        type: choice
+        options:
+        - validate
+        - promote-staging-qa
+        - promote-qa-prod
+        - full-pipeline
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: foodme-dev-cluster
+
+jobs:
+  validate-environment:
+    name: Validate Environment
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action_type == 'validate' || github.event.inputs.action_type == ''
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Test AWS connection
+      run: |
+        echo "🔍 Testing AWS connection..."
+        aws sts get-caller-identity
+        echo "✅ AWS connection successful!"
+        
+    - name: Update kubeconfig
+      run: |
+        echo "🔧 Updating kubeconfig..."
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        echo "✅ Kubeconfig updated!"
+        
+    - name: Test cluster connection
+      run: |
+        echo "🔍 Testing cluster connection..."
+        kubectl cluster-info
+        echo "✅ Cluster connection successful!"
+        
+    - name: Check ArgoCD applications
+      run: |
+        echo "🎯 Checking ArgoCD applications..."
+        kubectl get applications -n argocd
+        echo "✅ ArgoCD applications checked!"
+        
+    - name: Check environment pods
+      run: |
+        echo "🔍 Checking environment pods..."
+        
+        echo "STAGING pods:"
+        kubectl get pods -n foodme-staging || echo "No staging pods found"
+        
+        echo "QA pods:"
+        kubectl get pods -n foodme-qa || echo "No QA pods found"
+        
+        echo "PROD pods:"
+        kubectl get pods -n foodme-prod || echo "No PROD pods found"
+        
+        echo "✅ Environment check completed!"
+
+  promote-staging-qa:
+    name: Promote Staging to QA
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action_type == 'promote-staging-qa'
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: Validate staging environment
+      run: |
+        echo "🔍 Validating staging environment..."
+        
+        SYNC_STATUS=$(kubectl get application foodme-staging -n argocd -o jsonpath='{.status.sync.status}')
+        HEALTH_STATUS=$(kubectl get application foodme-staging -n argocd -o jsonpath='{.status.health.status}')
+        
+        echo "Staging status: Sync=$SYNC_STATUS, Health=$HEALTH_STATUS"
+        
+        if [[ "$SYNC_STATUS" != "Synced" || "$HEALTH_STATUS" != "Healthy" ]]; then
+          echo "❌ Staging environment is not healthy"
+          exit 1
+        fi
+        
+        echo "✅ Staging environment is healthy"
+        
+    - name: Promote to QA
+      run: |
+        echo "🚀 Promoting staging to QA..."
+        
+        # Trigger sync on QA application
+        kubectl patch application foodme-qa -n argocd --type merge -p '{"operation":{"sync":{}}}'
+        
+        echo "⏳ Waiting for sync to complete..."
+        sleep 30
+        
+        # Check QA status
+        QA_SYNC=$(kubectl get application foodme-qa -n argocd -o jsonpath='{.status.sync.status}')
+        echo "QA sync status: $QA_SYNC"
+        
+        echo "✅ Promotion to QA completed!"
+
+  promote-qa-prod:
+    name: Promote QA to PROD
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action_type == 'promote-qa-prod'
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: Validate QA environment
+      run: |
+        echo "🔍 Validating QA environment..."
+        
+        SYNC_STATUS=$(kubectl get application foodme-qa -n argocd -o jsonpath='{.status.sync.status}')
+        HEALTH_STATUS=$(kubectl get application foodme-qa -n argocd -o jsonpath='{.status.health.status}')
+        
+        echo "QA status: Sync=$SYNC_STATUS, Health=$HEALTH_STATUS"
+        
+        if [[ "$SYNC_STATUS" != "Synced" || "$HEALTH_STATUS" != "Healthy" ]]; then
+          echo "❌ QA environment is not healthy"
+          exit 1
+        fi
+        
+        echo "✅ QA environment is healthy"
+        
+    - name: Promote to PROD
+      run: |
+        echo "🚀 Promoting QA to PROD..."
+        
+        # Trigger sync on PROD application
+        kubectl patch application foodme-prod -n argocd --type merge -p '{"operation":{"sync":{}}}'
+        
+        echo "⏳ Waiting for sync to complete..."
+        sleep 30
+        
+        # Check PROD status
+        PROD_SYNC=$(kubectl get application foodme-prod -n argocd -o jsonpath='{.status.sync.status}')
+        echo "PROD sync status: $PROD_SYNC"
+        
+        echo "✅ Promotion to PROD completed!"
+
+  full-pipeline:
+    name: Full Pipeline Promotion
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action_type == 'full-pipeline'
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: Full pipeline execution
+      run: |
+        echo "🚀 Starting full pipeline: STAGING → QA → PROD"
+        
+        # Step 1: Promote STAGING → QA
+        echo "Step 1: Promoting STAGING → QA"
+        kubectl patch application foodme-qa -n argocd --type merge -p '{"operation":{"sync":{}}}'
+        
+        echo "⏳ Waiting for QA sync..."
+        sleep 45
+        
+        QA_STATUS=$(kubectl get application foodme-qa -n argocd -o jsonpath='{.status.sync.status}')
+        echo "QA status: $QA_STATUS"
+        
+        # Step 2: Promote QA → PROD
+        echo "Step 2: Promoting QA → PROD"
+        kubectl patch application foodme-prod -n argocd --type merge -p '{"operation":{"sync":{}}}'
+        
+        echo "⏳ Waiting for PROD sync..."
+        sleep 45
+        
+        PROD_STATUS=$(kubectl get application foodme-prod -n argocd -o jsonpath='{.status.sync.status}')
+        echo "PROD status: $PROD_STATUS"
+        
+        echo "🎉 Full pipeline completed!"
+        
+    - name: Final validation
+      run: |
+        echo "🔍 Final validation of all environments..."
+        
+        echo "=== ArgoCD Applications Status ==="
+        kubectl get applications -n argocd -o custom-columns="NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status"
+        
+        echo "=== Pod Status ==="
+        echo "STAGING:"
+        kubectl get pods -n foodme-staging 2>/dev/null || echo "No staging pods"
+        
+        echo "QA:"
+        kubectl get pods -n foodme-qa 2>/dev/null || echo "No QA pods"
+        
+        echo "PROD:"
+        kubectl get pods -n foodme-prod 2>/dev/null || echo "No PROD pods"
+        
+        echo "✅ Final validation completed!"
