@@ -1,0 +1,393 @@
+name: Environment Promotion - FoodMe
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_environment:
+        description: 'Source Environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - qa
+      target_environment:
+        description: 'Target Environment'
+        required: true
+        default: 'qa'
+        type: choice
+        options:
+        - qa
+        - prod
+      promotion_type:
+        description: 'Promotion Type'
+        required: true
+        default: 'single'
+        type: choice
+        options:
+        - single
+        - full-pipeline
+      
+  push:
+    branches: [ main ]
+    paths:
+    - 'environment-promotion/**'
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: meu-cluster-eks
+
+jobs:
+  validate-source:
+    name: Validate Source Environment
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: Validate source environment
+      run: |
+        SOURCE_ENV="${{ github.event.inputs.source_environment || 'staging' }}"
+        
+        echo "🔍 Validating $SOURCE_ENV environment..."
+        
+        # Verificar se aplicação existe no ArgoCD
+        if ! kubectl get application foodme-$SOURCE_ENV -n argocd; then
+          echo "❌ Application foodme-$SOURCE_ENV not found in ArgoCD"
+          exit 1
+        fi
+        
+        # Verificar status da aplicação
+        SYNC_STATUS=$(kubectl get application foodme-$SOURCE_ENV -n argocd -o jsonpath='{.status.sync.status}')
+        HEALTH_STATUS=$(kubectl get application foodme-$SOURCE_ENV -n argocd -o jsonpath='{.status.health.status}')
+        
+        echo "📊 Source Environment Status:"
+        echo "   • Sync: $SYNC_STATUS"
+        echo "   • Health: $HEALTH_STATUS"
+        
+        if [[ "$SYNC_STATUS" != "Synced" || "$HEALTH_STATUS" != "Healthy" ]]; then
+          echo "❌ Source environment $SOURCE_ENV is not healthy"
+          echo "   • Sync Status: $SYNC_STATUS (expected: Synced)"
+          echo "   • Health Status: $HEALTH_STATUS (expected: Healthy)"
+          exit 1
+        fi
+        
+        # Verificar pods
+        NAMESPACE="foodme-$SOURCE_ENV"
+        PODS_RUNNING=$(kubectl get pods -n $NAMESPACE --no-headers | grep Running | wc -l)
+        PODS_TOTAL=$(kubectl get pods -n $NAMESPACE --no-headers | wc -l)
+        
+        echo "   • Pods: $PODS_RUNNING/$PODS_TOTAL Running"
+        
+        if [[ $PODS_RUNNING -eq 0 ]]; then
+          echo "❌ No pods running in $SOURCE_ENV environment"
+          exit 1
+        fi
+        
+        echo "✅ Source environment $SOURCE_ENV is healthy and ready for promotion"
+
+  run-tests:
+    name: Run Tests on Source Environment
+    runs-on: ubuntu-latest
+    needs: validate-source
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: Run health checks
+      run: |
+        SOURCE_ENV="${{ github.event.inputs.source_environment || 'staging' }}"
+        NAMESPACE="foodme-$SOURCE_ENV"
+        
+        echo "🏥 Running health checks on $SOURCE_ENV..."
+        
+        # Obter URL do LoadBalancer
+        SERVICE_URL=$(kubectl get service -n $NAMESPACE -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        
+        if [ -z "$SERVICE_URL" ]; then
+          echo "❌ LoadBalancer URL not found for $SOURCE_ENV"
+          exit 1
+        fi
+        
+        echo "🌐 Testing connectivity to: http://$SERVICE_URL:3000"
+        
+        # Teste de conectividade
+        MAX_ATTEMPTS=10
+        ATTEMPT=1
+        
+        while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+          echo "Attempt $ATTEMPT/$MAX_ATTEMPTS..."
+          
+          if curl -f -s --connect-timeout 10 "http://$SERVICE_URL:3000" > /dev/null; then
+            echo "✅ Health check passed!"
+            break
+          fi
+          
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "❌ Health check failed after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
+          
+          sleep 10
+          ((ATTEMPT++))
+        done
+        
+        # Teste de carga leve
+        echo "⚡ Running light load test..."
+        
+        SUCCESS=0
+        TOTAL=5
+        
+        for i in $(seq 1 $TOTAL); do
+          if curl -f -s --connect-timeout 5 "http://$SERVICE_URL:3000" > /dev/null; then
+            ((SUCCESS++))
+          fi
+          sleep 1
+        done
+        
+        SUCCESS_RATE=$((SUCCESS * 100 / TOTAL))
+        echo "📊 Load test results: $SUCCESS/$TOTAL requests successful ($SUCCESS_RATE%)"
+        
+        if [ $SUCCESS_RATE -lt 80 ]; then
+          echo "❌ Load test failed - success rate below 80%"
+          exit 1
+        fi
+        
+        echo "✅ All tests passed for $SOURCE_ENV environment"
+
+  promote-single:
+    name: Single Environment Promotion
+    runs-on: ubuntu-latest
+    needs: [validate-source, run-tests]
+    if: github.event.inputs.promotion_type == 'single' || github.event.inputs.promotion_type == ''
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: Promote to target environment
+      run: |
+        SOURCE_ENV="${{ github.event.inputs.source_environment || 'staging' }}"
+        TARGET_ENV="${{ github.event.inputs.target_environment || 'qa' }}"
+        
+        echo "🚀 Promoting $SOURCE_ENV → $TARGET_ENV"
+        
+        # Sincronizar aplicação de destino
+        echo "🔄 Syncing target application..."
+        kubectl patch application foodme-$TARGET_ENV -n argocd --type merge -p '{"operation":{"sync":{}}}'
+        
+        # Aguardar sincronização
+        echo "⏳ Waiting for sync to complete..."
+        
+        for i in {1..60}; do
+          SYNC_STATUS=$(kubectl get application foodme-$TARGET_ENV -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+          
+          if [[ "$SYNC_STATUS" == "Synced" ]]; then
+            echo "✅ Sync completed successfully!"
+            break
+          fi
+          
+          if [ $i -eq 60 ]; then
+            echo "❌ Sync timeout after 5 minutes"
+            exit 1
+          fi
+          
+          echo "   Status: $SYNC_STATUS (attempt $i/60)"
+          sleep 5
+        done
+        
+        # Aguardar pods ficarem prontos
+        echo "⏳ Waiting for pods to be ready..."
+        kubectl wait --for=condition=ready pod -l app=app-foodme -n foodme-$TARGET_ENV --timeout=300s
+        
+        echo "✅ Promotion $SOURCE_ENV → $TARGET_ENV completed successfully!"
+
+  promote-full-pipeline:
+    name: Full Pipeline Promotion
+    runs-on: ubuntu-latest
+    needs: [validate-source, run-tests]
+    if: github.event.inputs.promotion_type == 'full-pipeline'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: Full pipeline promotion
+      run: |
+        echo "🚀 Starting full pipeline: STAGING → QA → PROD"
+        
+        # Função para promover ambiente
+        promote_env() {
+          local from_env=$1
+          local to_env=$2
+          
+          echo "🔄 Promoting $from_env → $to_env..."
+          
+          # Sincronizar
+          kubectl patch application foodme-$to_env -n argocd --type merge -p '{"operation":{"sync":{}}}'
+          
+          # Aguardar sync
+          for i in {1..60}; do
+            SYNC_STATUS=$(kubectl get application foodme-$to_env -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+            
+            if [[ "$SYNC_STATUS" == "Synced" ]]; then
+              echo "✅ $from_env → $to_env sync completed!"
+              break
+            fi
+            
+            if [ $i -eq 60 ]; then
+              echo "❌ $from_env → $to_env sync timeout"
+              return 1
+            fi
+            
+            sleep 5
+          done
+          
+          # Aguardar pods
+          kubectl wait --for=condition=ready pod -l app=app-foodme -n foodme-$to_env --timeout=300s
+          echo "✅ $from_env → $to_env promotion completed!"
+        }
+        
+        # Etapa 1: STAGING → QA
+        promote_env "staging" "qa"
+        
+        echo "⏳ Waiting 30 seconds for stabilization..."
+        sleep 30
+        
+        # Etapa 2: QA → PROD
+        promote_env "qa" "prod"
+        
+        echo "🎉 Full pipeline promotion completed successfully!"
+
+  post-promotion-tests:
+    name: Post-Promotion Tests
+    runs-on: ubuntu-latest
+    needs: [promote-single, promote-full-pipeline]
+    if: always() && (needs.promote-single.result == 'success' || needs.promote-full-pipeline.result == 'success')
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: Validate promoted environment
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment || 'qa' }}"
+        
+        if [[ "${{ github.event.inputs.promotion_type }}" == "full-pipeline" ]]; then
+          TARGET_ENV="prod"
+        fi
+        
+        echo "🔍 Validating promoted environment: $TARGET_ENV"
+        
+        # Verificar status da aplicação
+        SYNC_STATUS=$(kubectl get application foodme-$TARGET_ENV -n argocd -o jsonpath='{.status.sync.status}')
+        HEALTH_STATUS=$(kubectl get application foodme-$TARGET_ENV -n argocd -o jsonpath='{.status.health.status}')
+        
+        echo "📊 Target Environment Status:"
+        echo "   • Sync: $SYNC_STATUS"
+        echo "   • Health: $HEALTH_STATUS"
+        
+        # Teste de conectividade
+        NAMESPACE="foodme-$TARGET_ENV"
+        SERVICE_URL=$(kubectl get service -n $NAMESPACE -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        
+        if [ ! -z "$SERVICE_URL" ]; then
+          echo "🌐 Testing promoted environment: http://$SERVICE_URL:3000"
+          
+          # Aguardar LoadBalancer ficar pronto
+          sleep 60
+          
+          if curl -f -s --connect-timeout 15 "http://$SERVICE_URL:3000" > /dev/null; then
+            echo "✅ Promoted environment is responding correctly!"
+          else
+            echo "⚠️ Promoted environment is not responding yet (may still be initializing)"
+          fi
+        fi
+        
+        echo "✅ Post-promotion validation completed"
+
+  notify:
+    name: Notify Results
+    runs-on: ubuntu-latest
+    needs: [promote-single, promote-full-pipeline, post-promotion-tests]
+    if: always()
+    
+    steps:
+    - name: Notify success
+      if: needs.promote-single.result == 'success' || needs.promote-full-pipeline.result == 'success'
+      run: |
+        SOURCE_ENV="${{ github.event.inputs.source_environment || 'staging' }}"
+        TARGET_ENV="${{ github.event.inputs.target_environment || 'qa' }}"
+        PROMOTION_TYPE="${{ github.event.inputs.promotion_type || 'single' }}"
+        
+        echo "🎉 Environment Promotion Successful!"
+        echo "=================================="
+        echo "• Type: $PROMOTION_TYPE"
+        echo "• Source: $SOURCE_ENV"
+        echo "• Target: $TARGET_ENV"
+        echo "• Timestamp: $(date)"
+        echo ""
+        echo "✅ All environments are now updated and healthy!"
+        
+    - name: Notify failure
+      if: needs.promote-single.result == 'failure' || needs.promote-full-pipeline.result == 'failure'
+      run: |
+        echo "❌ Environment Promotion Failed!"
+        echo "==============================="
+        echo "• Check the workflow logs for details"
+        echo "• Verify source environment health"
+        echo "• Check ArgoCD applications status"
