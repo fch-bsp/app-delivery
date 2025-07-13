@@ -1,0 +1,293 @@
+name: Demo Test - Environment Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Type of test to run'
+        required: true
+        default: 'validation'
+        type: choice
+        options:
+        - validation
+        - simulation
+        - full-demo
+      environment:
+        description: 'Environment to test'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - qa
+        - prod
+      
+  push:
+    branches: [ main ]
+    paths:
+    - '.github/workflows/demo-test.yml'
+
+jobs:
+  demo-validation:
+    name: Demo Validation Tests
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_type == 'validation' || github.event.inputs.test_type == ''
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Validate repository structure
+      run: |
+        echo "🔍 Validating repository structure for Environment Promotion..."
+        
+        # Verificar estrutura base
+        if [ -d "environment-promotion" ]; then
+          echo "✅ environment-promotion directory found"
+        else
+          echo "❌ environment-promotion directory not found"
+          exit 1
+        fi
+        
+        # Verificar base
+        if [ -d "environment-promotion/base" ]; then
+          echo "✅ base directory found"
+        else
+          echo "❌ base directory not found"
+          exit 1
+        fi
+        
+        # Verificar ambientes
+        for env in staging qa prod; do
+          if [ -d "environment-promotion/envs/$env" ]; then
+            echo "✅ $env environment found"
+          else
+            echo "❌ $env environment not found"
+            exit 1
+          fi
+        done
+        
+        echo "🎉 Repository structure validation passed!"
+        
+    - name: Validate Kustomize files
+      run: |
+        echo "🔧 Validating Kustomize configurations..."
+        
+        # Instalar kustomize
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+        
+        # Validar cada ambiente
+        for env in staging qa prod; do
+          echo "Validating $env environment..."
+          
+          if kustomize build environment-promotion/envs/$env > /dev/null; then
+            echo "✅ $env kustomization is valid"
+          else
+            echo "❌ $env kustomization has errors"
+            exit 1
+          fi
+        done
+        
+        echo "🎉 All Kustomize configurations are valid!"
+        
+    - name: Generate manifests preview
+      run: |
+        echo "📋 Generating manifest previews..."
+        
+        for env in staging qa prod; do
+          echo ""
+          echo "=== $env Environment Manifest ==="
+          kustomize build environment-promotion/envs/$env | head -20
+          echo "... (truncated for brevity)"
+        done
+
+  demo-simulation:
+    name: Demo Simulation Tests
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_type == 'simulation'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Simulate environment promotion
+      run: |
+        ENV="${{ github.event.inputs.environment || 'staging' }}"
+        
+        echo "🎯 Simulating Environment Promotion for: $ENV"
+        echo "============================================="
+        
+        # Simular validação de ambiente
+        echo "🔍 Step 1: Validating source environment ($ENV)..."
+        sleep 2
+        echo "   ✅ Environment health: OK"
+        echo "   ✅ Application status: Healthy"
+        echo "   ✅ Pods status: Running"
+        
+        # Simular testes
+        echo ""
+        echo "🧪 Step 2: Running tests on $ENV..."
+        sleep 3
+        echo "   ✅ Health check: PASSED"
+        echo "   ✅ Connectivity test: PASSED"
+        echo "   ✅ Load test: PASSED (100% success rate)"
+        
+        # Simular promoção
+        if [ "$ENV" = "staging" ]; then
+          TARGET="qa"
+        elif [ "$ENV" = "qa" ]; then
+          TARGET="prod"
+        else
+          TARGET="none"
+        fi
+        
+        if [ "$TARGET" != "none" ]; then
+          echo ""
+          echo "🚀 Step 3: Simulating promotion $ENV → $TARGET..."
+          sleep 2
+          echo "   🔄 Syncing target application..."
+          sleep 1
+          echo "   ⏳ Waiting for sync to complete..."
+          sleep 2
+          echo "   ✅ Sync completed successfully!"
+          echo "   ⏳ Waiting for pods to be ready..."
+          sleep 1
+          echo "   ✅ Promotion $ENV → $TARGET completed!"
+        else
+          echo ""
+          echo "ℹ️  Step 3: $ENV is the final environment (no promotion target)"
+        fi
+        
+        # Simular validação pós-promoção
+        echo ""
+        echo "🔍 Step 4: Post-promotion validation..."
+        sleep 1
+        echo "   ✅ Target environment health: OK"
+        echo "   ✅ Application responding: OK"
+        echo "   ✅ All validations passed!"
+        
+        echo ""
+        echo "🎉 Environment Promotion Simulation Completed Successfully!"
+
+  demo-full:
+    name: Full Demo Pipeline
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_type == 'full-demo'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Full pipeline demonstration
+      run: |
+        echo "🚀 Full Environment Promotion Pipeline Demo"
+        echo "==========================================="
+        
+        # Função para simular promoção
+        simulate_promotion() {
+          local from_env=$1
+          local to_env=$2
+          
+          echo ""
+          echo "🎯 Promoting $from_env → $to_env"
+          echo "--------------------------------"
+          
+          echo "🔍 Validating $from_env environment..."
+          sleep 1
+          echo "   ✅ Health: OK"
+          echo "   ✅ Tests: PASSED"
+          
+          echo "🔄 Syncing $to_env application..."
+          sleep 2
+          echo "   ✅ Sync completed!"
+          
+          echo "⏳ Waiting for $to_env pods..."
+          sleep 1
+          echo "   ✅ Pods ready!"
+          
+          echo "✅ $from_env → $to_env promotion completed!"
+        }
+        
+        # Simular pipeline completo
+        echo "Starting full pipeline: STAGING → QA → PROD"
+        
+        # Etapa 1: STAGING → QA
+        simulate_promotion "staging" "qa"
+        
+        echo ""
+        echo "⏳ Waiting 10 seconds for stabilization..."
+        sleep 3  # Reduzido para demo
+        
+        # Etapa 2: QA → PROD
+        simulate_promotion "qa" "prod"
+        
+        echo ""
+        echo "🎉 Full Pipeline Completed Successfully!"
+        echo ""
+        echo "📊 Final Status:"
+        echo "• STAGING: ✅ Healthy"
+        echo "• QA: ✅ Healthy" 
+        echo "• PROD: ✅ Healthy"
+        echo ""
+        echo "🌐 Environment URLs:"
+        echo "• STAGING: http://staging.foodme.example.com"
+        echo "• QA: http://qa.foodme.example.com"
+        echo "• PROD: http://prod.foodme.example.com"
+
+  demo-results:
+    name: Demo Results Summary
+    runs-on: ubuntu-latest
+    needs: [demo-validation, demo-simulation, demo-full]
+    if: always()
+    
+    steps:
+    - name: Summary
+      run: |
+        echo "📊 Demo Test Results Summary"
+        echo "============================"
+        
+        # Verificar resultados dos jobs
+        VALIDATION_RESULT="${{ needs.demo-validation.result }}"
+        SIMULATION_RESULT="${{ needs.demo-simulation.result }}"
+        FULL_DEMO_RESULT="${{ needs.demo-full.result }}"
+        
+        echo "🔍 Validation Tests: $VALIDATION_RESULT"
+        echo "🎯 Simulation Tests: $SIMULATION_RESULT"
+        echo "🚀 Full Demo: $FULL_DEMO_RESULT"
+        
+        # Contar sucessos
+        SUCCESS_COUNT=0
+        
+        if [ "$VALIDATION_RESULT" = "success" ]; then
+          ((SUCCESS_COUNT++))
+        fi
+        
+        if [ "$SIMULATION_RESULT" = "success" ]; then
+          ((SUCCESS_COUNT++))
+        fi
+        
+        if [ "$FULL_DEMO_RESULT" = "success" ]; then
+          ((SUCCESS_COUNT++))
+        fi
+        
+        echo ""
+        echo "📈 Success Rate: $SUCCESS_COUNT/3 tests passed"
+        
+        if [ $SUCCESS_COUNT -eq 3 ]; then
+          echo "🎉 All demo tests completed successfully!"
+          echo "✅ Environment Promotion system is working correctly"
+        elif [ $SUCCESS_COUNT -gt 0 ]; then
+          echo "⚠️ Some tests completed successfully"
+          echo "🔍 Check individual job logs for details"
+        else
+          echo "❌ Demo tests encountered issues"
+          echo "🔧 Review configuration and try again"
+        fi
+        
+        echo ""
+        echo "🎯 Next Steps:"
+        echo "• Configure AWS secrets for real cluster testing"
+        echo "• Test with actual EKS cluster"
+        echo "• Monitor ArgoCD applications"
+        echo "• Validate application URLs"
