@@ -1,0 +1,318 @@
+# Debug version of promotion workflow with detailed diagnostics
+
+name: Debug Application Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_env:
+        description: 'Source environment'
+        required: true
+        default: 'qa' 
+        type: choice
+        options:
+        - qa
+        - staging
+        - prod 
+      target_env:
+        description: 'Target environment'
+        required: true
+        default: 'staging' 
+        type: choice
+        options:
+        - qa
+        - staging
+        - prod 
+      promote_container:
+        description: 'Promote container tag'
+        required: true 
+        type: boolean 
+        default: true
+      promote_replicas:
+        description: 'Also promote replica configuration'
+        required: true 
+        type: boolean 
+        default: true
+      promote_configmaps:
+        description: 'Also promote application settings'
+        required: true 
+        type: boolean 
+        default: false
+      message:
+        description: 'Commit message'
+        required: true 
+        type: string  
+        default: 'Application promotion'
+
+jobs:
+  debug-environment:
+    name: Debug Environment
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Show repository structure
+        run: |
+          echo "🔍 Repository structure:"
+          find . -type f -name "*.yaml" -o -name "*.yml" | head -20
+          
+      - name: Check environment directories
+        run: |
+          echo "📁 Environment directories:"
+          ls -la environment-promotion/ || echo "❌ environment-promotion directory not found"
+          
+          echo ""
+          echo "📁 Environment subdirectories:"
+          ls -la environment-promotion/envs/ || echo "❌ envs directory not found"
+          
+      - name: Check source environment
+        run: |
+          source_dir="environment-promotion/envs/${{ inputs.source_env }}"
+          echo "📂 Source environment (${{ inputs.source_env }}):"
+          
+          if [ -d "$source_dir" ]; then
+            ls -la "$source_dir"
+            echo ""
+            echo "📄 File contents:"
+            for file in "$source_dir"/*.yaml; do
+              if [ -f "$file" ]; then
+                echo "--- $(basename $file) ---"
+                cat "$file"
+                echo ""
+              fi
+            done
+          else
+            echo "❌ Source directory not found: $source_dir"
+            exit 1
+          fi
+          
+      - name: Check target environment
+        run: |
+          target_dir="environment-promotion/envs/${{ inputs.target_env }}"
+          echo "📂 Target environment (${{ inputs.target_env }}):"
+          
+          if [ -d "$target_dir" ]; then
+            ls -la "$target_dir"
+          else
+            echo "⚠️ Target directory not found: $target_dir"
+            echo "Creating target directory..."
+            mkdir -p "$target_dir"
+          fi
+
+  validate-promotion:
+    name: Validate Promotion Path
+    runs-on: ubuntu-latest
+    needs: debug-environment
+    outputs:
+      can_promote: ${{ steps.validation.outputs.can_promote }}
+    steps:
+      - name: Validate promotion path
+        id: validation
+        run: |
+          source="${{ inputs.source_env }}"
+          target="${{ inputs.target_env }}"
+          
+          echo "🔍 Validating promotion: $source → $target"
+          
+          # Prevent promoting to the same environment
+          if [ "$source" = "$target" ]; then
+            echo "❌ Cannot promote from $source to $target (same environment)"
+            echo "can_promote=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Define valid promotion paths
+          case "$source-$target" in
+            "qa-staging"|"staging-prod"|"qa-prod")
+              echo "✅ Valid promotion path: $source → $target"
+              echo "can_promote=true" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "❌ Invalid promotion path: $source → $target"
+              echo "Valid paths: qa→staging, staging→prod, qa→prod"
+              echo "can_promote=false" >> $GITHUB_OUTPUT
+              exit 1
+              ;;
+          esac
+
+  promote:
+    name: Promote Application
+    needs: validate-promotion
+    if: needs.validate-promotion.outputs.can_promote == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure target directory exists
+        run: |
+          target_dir="environment-promotion/envs/${{ inputs.target_env }}"
+          mkdir -p "$target_dir"
+          echo "✅ Target directory ready: $target_dir"
+
+      - name: Copy container version
+        if: ${{ inputs.promote_container }}
+        run: |
+          source_file="environment-promotion/envs/${{ inputs.source_env }}/environment.yaml"
+          target_file="environment-promotion/envs/${{ inputs.target_env }}/environment.yaml"
+          
+          echo "📋 Copying container configuration..."
+          echo "Source: $source_file"
+          echo "Target: $target_file"
+          
+          if [ -f "$source_file" ]; then
+            cp "$source_file" "$target_file"
+            echo "✅ Copied environment.yaml"
+            echo "Content:"
+            cat "$target_file"
+          else
+            echo "❌ Source file not found: $source_file"
+            echo "Available files in source directory:"
+            ls -la "environment-promotion/envs/${{ inputs.source_env }}/" || echo "Source directory not found"
+            exit 1
+          fi
+
+      - name: Copy replica configuration
+        if: ${{ inputs.promote_replicas }}
+        run: |
+          source_file="environment-promotion/envs/${{ inputs.source_env }}/replicas.yaml"
+          target_file="environment-promotion/envs/${{ inputs.target_env }}/replicas.yaml"
+          
+          echo "📋 Copying replica configuration..."
+          echo "Source: $source_file"
+          echo "Target: $target_file"
+          
+          if [ -f "$source_file" ]; then
+            cp "$source_file" "$target_file"
+            echo "✅ Copied replicas.yaml"
+            echo "Content:"
+            cat "$target_file"
+          else
+            echo "❌ Source file not found: $source_file"
+            echo "Available files in source directory:"
+            ls -la "environment-promotion/envs/${{ inputs.source_env }}/" || echo "Source directory not found"
+            exit 1
+          fi
+
+      - name: Copy service configuration
+        if: ${{ inputs.promote_configmaps }}
+        run: |
+          source_file="environment-promotion/envs/${{ inputs.source_env }}/service.yaml"
+          target_file="environment-promotion/envs/${{ inputs.target_env }}/service.yaml"
+          
+          echo "📋 Copying service configuration..."
+          echo "Source: $source_file"
+          echo "Target: $target_file"
+          
+          if [ -f "$source_file" ]; then
+            cp "$source_file" "$target_file"
+            echo "✅ Copied service.yaml"
+            echo "Content:"
+            cat "$target_file"
+          else
+            echo "⚠️ Source file not found: $source_file (skipping)"
+          fi
+
+      - name: Copy kustomization
+        if: ${{ inputs.promote_configmaps }}
+        run: |
+          source_file="environment-promotion/envs/${{ inputs.source_env }}/kustomization.yaml"
+          target_file="environment-promotion/envs/${{ inputs.target_env }}/kustomization.yaml"
+          
+          echo "📋 Copying kustomization..."
+          echo "Source: $source_file"
+          echo "Target: $target_file"
+          
+          if [ -f "$source_file" ]; then
+            cp "$source_file" "$target_file"
+            echo "✅ Copied kustomization.yaml"
+            echo "Content:"
+            cat "$target_file"
+          else
+            echo "⚠️ Source file not found: $source_file (skipping)"
+          fi
+
+      - name: Validate YAML files
+        run: |
+          echo "🔍 Validating YAML files..."
+          target_dir="environment-promotion/envs/${{ inputs.target_env }}"
+          
+          # Install PyYAML if not available
+          python3 -m pip install PyYAML || echo "PyYAML already installed"
+          
+          for file in "$target_dir"/*.yaml; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              echo "Validating: $filename"
+              
+              if python3 -c "import yaml; yaml.safe_load(open('$file'))" 2>/dev/null; then
+                echo "   ✅ Valid YAML syntax"
+              else
+                echo "   ❌ Invalid YAML syntax in $filename"
+                echo "   File content:"
+                cat "$file"
+                exit 1
+              fi
+            fi
+          done
+          
+          echo "✅ All YAML files are valid"
+
+      - name: Show final state
+        run: |
+          echo "📊 Final promotion state:"
+          echo "Target directory: environment-promotion/envs/${{ inputs.target_env }}"
+          ls -la "environment-promotion/envs/${{ inputs.target_env }}/"
+          
+          echo ""
+          echo "📄 All promoted files:"
+          for file in environment-promotion/envs/${{ inputs.target_env }}/*.yaml; do
+            if [ -f "$file" ]; then
+              echo "--- $(basename $file) ---"
+              cat "$file"
+              echo ""
+            fi
+          done
+
+      - name: Commit changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: |
+            🚀 ${{ inputs.message }}
+            
+            Promoted from ${{ inputs.source_env }} to ${{ inputs.target_env }}
+            - Container: ${{ inputs.promote_container }}
+            - Replicas: ${{ inputs.promote_replicas }}
+            - Config: ${{ inputs.promote_configmaps }}
+            
+            [skip ci]
+          file_pattern: 'environment-promotion/envs/${{ inputs.target_env }}/*'
+
+  notify-result:
+    name: Notify Result
+    runs-on: ubuntu-latest
+    needs: [validate-promotion, promote]
+    if: always()
+    
+    steps:
+      - name: Success notification
+        if: success()
+        run: |
+          echo "🎉 Promotion completed successfully!"
+          echo "=================================="
+          echo "• Source: ${{ inputs.source_env }}"
+          echo "• Target: ${{ inputs.target_env }}"
+          echo "• Container promoted: ${{ inputs.promote_container }}"
+          echo "• Replicas promoted: ${{ inputs.promote_replicas }}"
+          echo "• Config promoted: ${{ inputs.promote_configmaps }}"
+          
+      - name: Failure notification
+        if: failure()
+        run: |
+          echo "❌ Promotion failed!"
+          echo "==================="
+          echo "• Source: ${{ inputs.source_env }}"
+          echo "• Target: ${{ inputs.target_env }}"
+          echo "• Check the debug logs above for detailed information"
+          echo "• Verify that source environment files exist"
