@@ -1,0 +1,387 @@
+name: 🚀 Environment Promotion - Team Demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_environment:
+        description: '🔧 Source Environment (FROM)'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - qa
+      target_environment:
+        description: '🎯 Target Environment (TO)'
+        required: true
+        default: 'qa'
+        type: choice
+        options:
+        - qa
+        - prod
+      promotion_reason:
+        description: '📝 Reason for Promotion'
+        required: true
+        default: 'Feature ready for next environment'
+        type: choice
+        options:
+        - 'Feature ready for next environment'
+        - 'Bug fix validation'
+        - 'Performance improvement'
+        - 'Security update'
+        - 'Hotfix deployment'
+        - 'Scheduled release'
+      approval_required:
+        description: '✅ Require Manual Approval'
+        required: true
+        default: true
+        type: boolean
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: foodme-dev-cluster
+
+jobs:
+  pre-promotion-validation:
+    name: 🔍 Pre-Promotion Validation
+    runs-on: ubuntu-latest
+    outputs:
+      source-status: ${{ steps.validate-source.outputs.status }}
+      source-version: ${{ steps.validate-source.outputs.version }}
+      promotion-safe: ${{ steps.safety-check.outputs.safe }}
+    
+    steps:
+    - name: 🎯 Display Promotion Request
+      run: |
+        echo "# 🚀 Environment Promotion Request" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| **Source** | 🔧 ${{ github.event.inputs.source_environment }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Target** | 🎯 ${{ github.event.inputs.target_environment }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Reason** | 📝 ${{ github.event.inputs.promotion_reason }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Approval** | ✅ ${{ github.event.inputs.approval_required }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Requested by** | 👤 ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Timestamp** | 🕐 $(date -u '+%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+    - name: ⚙️ Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: 🔧 Setup Kubernetes Access
+      run: |
+        echo "🔧 Configuring kubectl access to EKS cluster..."
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        echo "✅ Kubernetes access configured"
+        
+    - name: 🔍 Validate Source Environment
+      id: validate-source
+      run: |
+        SOURCE_ENV="${{ github.event.inputs.source_environment }}"
+        echo "🔍 Validating source environment: $SOURCE_ENV"
+        
+        # Check ArgoCD application status
+        SYNC_STATUS=$(kubectl get application foodme-$SOURCE_ENV -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "NotFound")
+        HEALTH_STATUS=$(kubectl get application foodme-$SOURCE_ENV -n argocd -o jsonpath='{.status.health.status}' 2>/dev/null || echo "NotFound")
+        
+        # Check pods
+        PODS_READY=$(kubectl get pods -n foodme-$SOURCE_ENV --no-headers 2>/dev/null | grep Running | wc -l || echo "0")
+        PODS_TOTAL=$(kubectl get pods -n foodme-$SOURCE_ENV --no-headers 2>/dev/null | wc -l || echo "0")
+        
+        # Get application version/image
+        APP_IMAGE=$(kubectl get deployment -n foodme-$SOURCE_ENV -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' 2>/dev/null || echo "unknown")
+        
+        echo "## 🔍 Source Environment Status" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Metric | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| **ArgoCD Sync** | $SYNC_STATUS |" >> $GITHUB_STEP_SUMMARY
+        echo "| **ArgoCD Health** | $HEALTH_STATUS |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Pods Running** | $PODS_READY/$PODS_TOTAL |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Application Image** | \`$APP_IMAGE\` |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Set outputs
+        if [[ "$SYNC_STATUS" == "Synced" && "$HEALTH_STATUS" == "Healthy" && "$PODS_READY" -gt 0 ]]; then
+          echo "status=healthy" >> $GITHUB_OUTPUT
+          echo "✅ Source environment is healthy and ready for promotion"
+        else
+          echo "status=unhealthy" >> $GITHUB_OUTPUT
+          echo "❌ Source environment is not ready for promotion"
+          echo "   - Sync: $SYNC_STATUS (expected: Synced)"
+          echo "   - Health: $HEALTH_STATUS (expected: Healthy)"
+          echo "   - Pods: $PODS_READY/$PODS_TOTAL (expected: >0 running)"
+          exit 1
+        fi
+        
+        echo "version=$APP_IMAGE" >> $GITHUB_OUTPUT
+        
+    - name: 🛡️ Safety Check
+      id: safety-check
+      run: |
+        SOURCE_ENV="${{ github.event.inputs.source_environment }}"
+        TARGET_ENV="${{ github.event.inputs.target_environment }}"
+        
+        echo "🛡️ Performing safety checks..."
+        
+        # Validate promotion path
+        VALID_PROMOTION=false
+        if [[ "$SOURCE_ENV" == "staging" && "$TARGET_ENV" == "qa" ]]; then
+          VALID_PROMOTION=true
+        elif [[ "$SOURCE_ENV" == "qa" && "$TARGET_ENV" == "prod" ]]; then
+          VALID_PROMOTION=true
+        fi
+        
+        if [[ "$VALID_PROMOTION" == "true" ]]; then
+          echo "safe=true" >> $GITHUB_OUTPUT
+          echo "✅ Promotion path is valid: $SOURCE_ENV → $TARGET_ENV"
+        else
+          echo "safe=false" >> $GITHUB_OUTPUT
+          echo "❌ Invalid promotion path: $SOURCE_ENV → $TARGET_ENV"
+          echo "Valid paths: staging → qa, qa → prod"
+          exit 1
+        fi
+
+  manual-approval:
+    name: ✅ Manual Approval Required
+    runs-on: ubuntu-latest
+    needs: pre-promotion-validation
+    if: github.event.inputs.approval_required == 'true'
+    environment: 
+      name: promotion-approval
+    
+    steps:
+    - name: ⏳ Waiting for Approval
+      run: |
+        echo "## ⏳ Manual Approval Required" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "This promotion requires manual approval before proceeding." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Promotion Details:**" >> $GITHUB_STEP_SUMMARY
+        echo "- **From:** ${{ github.event.inputs.source_environment }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **To:** ${{ github.event.inputs.target_environment }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Reason:** ${{ github.event.inputs.promotion_reason }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Source Status:** ${{ needs.pre-promotion-validation.outputs.source-status }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **Approval granted by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+
+  execute-promotion:
+    name: 🚀 Execute Environment Promotion
+    runs-on: ubuntu-latest
+    needs: [pre-promotion-validation, manual-approval]
+    if: always() && needs.pre-promotion-validation.outputs.promotion-safe == 'true' && (needs.manual-approval.result == 'success' || github.event.inputs.approval_required == 'false')
+    
+    steps:
+    - name: ⚙️ Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: 🔧 Setup Kubernetes Access
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: 🚀 Promote to Target Environment
+      run: |
+        SOURCE_ENV="${{ github.event.inputs.source_environment }}"
+        TARGET_ENV="${{ github.event.inputs.target_environment }}"
+        
+        echo "## 🚀 Executing Promotion" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Promoting from **$SOURCE_ENV** to **$TARGET_ENV**..." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Trigger ArgoCD sync on target environment
+        echo "🔄 Triggering ArgoCD sync for $TARGET_ENV environment..."
+        kubectl patch application foodme-$TARGET_ENV -n argocd --type merge -p '{"operation":{"sync":{}}}'
+        
+        echo "⏳ Waiting for sync to complete..."
+        
+        # Wait for sync with timeout
+        TIMEOUT=300  # 5 minutes
+        ELAPSED=0
+        
+        while [ $ELAPSED -lt $TIMEOUT ]; do
+          SYNC_STATUS=$(kubectl get application foodme-$TARGET_ENV -n argocd -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+          
+          if [[ "$SYNC_STATUS" == "Synced" ]]; then
+            echo "✅ Sync completed successfully!"
+            break
+          fi
+          
+          echo "   Current status: $SYNC_STATUS (elapsed: ${ELAPSED}s)"
+          sleep 10
+          ELAPSED=$((ELAPSED + 10))
+        done
+        
+        if [ $ELAPSED -ge $TIMEOUT ]; then
+          echo "❌ Sync timeout after $TIMEOUT seconds"
+          exit 1
+        fi
+        
+    - name: ⏳ Wait for Deployment Rollout
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment }}"
+        
+        echo "⏳ Waiting for deployment rollout in $TARGET_ENV..."
+        
+        # Wait for pods to be ready
+        kubectl wait --for=condition=ready pod -l app=app-foodme -n foodme-$TARGET_ENV --timeout=300s
+        
+        echo "✅ Deployment rollout completed successfully!"
+        
+    - name: 🔍 Post-Promotion Validation
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment }}"
+        
+        echo "🔍 Validating target environment after promotion..."
+        
+        # Check ArgoCD status
+        SYNC_STATUS=$(kubectl get application foodme-$TARGET_ENV -n argocd -o jsonpath='{.status.sync.status}')
+        HEALTH_STATUS=$(kubectl get application foodme-$TARGET_ENV -n argocd -o jsonpath='{.status.health.status}')
+        
+        # Check pods
+        PODS_READY=$(kubectl get pods -n foodme-$TARGET_ENV --no-headers | grep Running | wc -l)
+        PODS_TOTAL=$(kubectl get pods -n foodme-$TARGET_ENV --no-headers | wc -l)
+        
+        # Get new application version
+        NEW_IMAGE=$(kubectl get deployment -n foodme-$TARGET_ENV -o jsonpath='{.items[0].spec.template.spec.containers[0].image}')
+        
+        echo "## 🎯 Target Environment Status" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Metric | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| **ArgoCD Sync** | $SYNC_STATUS |" >> $GITHUB_STEP_SUMMARY
+        echo "| **ArgoCD Health** | $HEALTH_STATUS |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Pods Running** | $PODS_READY/$PODS_TOTAL |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Application Image** | \`$NEW_IMAGE\` |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "$SYNC_STATUS" == "Synced" && "$HEALTH_STATUS" == "Healthy" && "$PODS_READY" -gt 0 ]]; then
+          echo "✅ Target environment is healthy after promotion!"
+        else
+          echo "❌ Target environment validation failed"
+          exit 1
+        fi
+
+  health-check:
+    name: 🏥 Health Check & Connectivity Test
+    runs-on: ubuntu-latest
+    needs: execute-promotion
+    
+    steps:
+    - name: ⚙️ Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: 🔧 Setup Kubernetes Access
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+        
+    - name: 🏥 Application Health Check
+      run: |
+        TARGET_ENV="${{ github.event.inputs.target_environment }}"
+        
+        echo "🏥 Performing health check on $TARGET_ENV environment..."
+        
+        # Get service URL
+        SERVICE_URL=$(kubectl get service -n foodme-$TARGET_ENV -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        
+        if [ ! -z "$SERVICE_URL" ]; then
+          echo "🌐 Testing connectivity to: http://$SERVICE_URL:3000"
+          
+          # Test connectivity with retries
+          SUCCESS=0
+          ATTEMPTS=5
+          
+          for i in $(seq 1 $ATTEMPTS); do
+            if curl -f -s --connect-timeout 10 "http://$SERVICE_URL:3000" > /dev/null; then
+              SUCCESS=$((SUCCESS + 1))
+            fi
+            sleep 2
+          done
+          
+          SUCCESS_RATE=$((SUCCESS * 100 / ATTEMPTS))
+          
+          echo "## 🏥 Health Check Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | $TARGET_ENV |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Service URL** | http://$SERVICE_URL:3000 |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Connectivity Tests** | $SUCCESS/$ATTEMPTS successful |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Success Rate** | $SUCCESS_RATE% |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ $SUCCESS_RATE -ge 80 ]; then
+            echo "✅ Health check passed! ($SUCCESS_RATE% success rate)"
+          else
+            echo "⚠️ Health check warning: Low success rate ($SUCCESS_RATE%)"
+          fi
+        else
+          echo "⚠️ LoadBalancer URL not available yet (may still be provisioning)"
+          echo "## 🏥 Health Check Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ LoadBalancer URL not available for connectivity testing" >> $GITHUB_STEP_SUMMARY
+        fi
+
+  promotion-summary:
+    name: 📊 Promotion Summary
+    runs-on: ubuntu-latest
+    needs: [pre-promotion-validation, execute-promotion, health-check]
+    if: always()
+    
+    steps:
+    - name: 📊 Generate Promotion Report
+      run: |
+        echo "# 🎉 Environment Promotion Completed" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## 📋 Promotion Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| **Source Environment** | 🔧 ${{ github.event.inputs.source_environment }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Target Environment** | 🎯 ${{ github.event.inputs.target_environment }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Promotion Reason** | 📝 ${{ github.event.inputs.promotion_reason }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Executed By** | 👤 ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Execution Time** | 🕐 $(date -u '+%Y-%m-%d %H:%M:%S UTC') |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Workflow Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Determine overall status
+        VALIDATION_STATUS="${{ needs.pre-promotion-validation.result }}"
+        PROMOTION_STATUS="${{ needs.execute-promotion.result }}"
+        HEALTH_STATUS="${{ needs.health-check.result }}"
+        
+        echo "## 🔍 Job Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| **Pre-Promotion Validation** | $VALIDATION_STATUS |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Execute Promotion** | $PROMOTION_STATUS |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Health Check** | $HEALTH_STATUS |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "$PROMOTION_STATUS" == "success" ]]; then
+          echo "## ✅ Promotion Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The application has been successfully promoted from **${{ github.event.inputs.source_environment }}** to **${{ github.event.inputs.target_environment }}**." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🎯 Next Steps:" >> $GITHUB_STEP_SUMMARY
+          echo "- Monitor the **${{ github.event.inputs.target_environment }}** environment" >> $GITHUB_STEP_SUMMARY
+          echo "- Verify application functionality" >> $GITHUB_STEP_SUMMARY
+          echo "- Consider promoting to the next environment if applicable" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "## ❌ Promotion Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The promotion encountered issues. Please check the job logs for details." >> $GITHUB_STEP_SUMMARY
+        fi
