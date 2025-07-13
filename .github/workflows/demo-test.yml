@@ -31,7 +31,7 @@ jobs:
   demo-validation:
     name: Demo Validation Tests
     runs-on: ubuntu-latest
-    if: github.event.inputs.test_type == 'validation' || github.event.inputs.test_type == ''
+    if: github.event.inputs.test_type == 'validation' || github.event.inputs.test_type == '' || github.event_name == 'push'
     
     steps:
     - name: Checkout code
@@ -256,33 +256,49 @@ jobs:
         echo "🎯 Simulation Tests: $SIMULATION_RESULT"
         echo "🚀 Full Demo: $FULL_DEMO_RESULT"
         
-        # Contar sucessos
+        # Contar sucessos (apenas jobs que rodaram)
         SUCCESS_COUNT=0
+        TOTAL_COUNT=0
         
+        # Validation sempre roda
         if [ "$VALIDATION_RESULT" = "success" ]; then
           ((SUCCESS_COUNT++))
         fi
+        ((TOTAL_COUNT++))
         
+        # Simulation só roda se selecionado
         if [ "$SIMULATION_RESULT" = "success" ]; then
           ((SUCCESS_COUNT++))
+          ((TOTAL_COUNT++))
+        elif [ "$SIMULATION_RESULT" = "failure" ]; then
+          ((TOTAL_COUNT++))
         fi
         
+        # Full demo só roda se selecionado
         if [ "$FULL_DEMO_RESULT" = "success" ]; then
           ((SUCCESS_COUNT++))
+          ((TOTAL_COUNT++))
+        elif [ "$FULL_DEMO_RESULT" = "failure" ]; then
+          ((TOTAL_COUNT++))
         fi
         
         echo ""
-        echo "📈 Success Rate: $SUCCESS_COUNT/3 tests passed"
+        echo "📈 Success Rate: $SUCCESS_COUNT/$TOTAL_COUNT tests passed"
         
-        if [ $SUCCESS_COUNT -eq 3 ]; then
-          echo "🎉 All demo tests completed successfully!"
+        # Determinar status geral
+        if [ $TOTAL_COUNT -eq 0 ]; then
+          echo "⚠️ No tests were executed"
+          exit 1
+        elif [ $SUCCESS_COUNT -eq $TOTAL_COUNT ]; then
+          echo "🎉 All executed tests completed successfully!"
           echo "✅ Environment Promotion system is working correctly"
         elif [ $SUCCESS_COUNT -gt 0 ]; then
           echo "⚠️ Some tests completed successfully"
           echo "🔍 Check individual job logs for details"
         else
-          echo "❌ Demo tests encountered issues"
+          echo "❌ All executed tests failed"
           echo "🔧 Review configuration and try again"
+          exit 1
         fi
         
         echo ""
@@ -291,3 +307,13 @@ jobs:
         echo "• Test with actual EKS cluster"
         echo "• Monitor ArgoCD applications"
         echo "• Validate application URLs"
+        
+        # Mostrar informações sobre como executar testes específicos
+        if [ "${{ github.event_name }}" = "push" ]; then
+          echo ""
+          echo "💡 Para testar funcionalidades específicas:"
+          echo "• Vá para: https://github.com/fch-bsp/app-delivery/actions"
+          echo "• Clique em 'Demo Test - Environment Promotion'"
+          echo "• Clique em 'Run workflow'"
+          echo "• Selecione o tipo de teste desejado"
+        fi
